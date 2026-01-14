@@ -19,7 +19,6 @@ from ta.volume import OnBalanceVolumeIndicator, VolumeWeightedAveragePrice
 # ==========================================
 matplotlib.use('Agg')
 
-# 自動下載並設定中文字型
 def get_chinese_font_path():
     font_filename = "NotoSansCJKtc-Regular.otf"
     if not os.path.exists(font_filename):
@@ -42,7 +41,7 @@ else:
 
 plt.rcParams['axes.unicode_minus'] = False
 
-st.set_page_config(page_title="美股全方位決策系統 (Nasdaq版)", layout="wide")
+st.set_page_config(page_title="美股全方位決策系統 (全市場版)", layout="wide")
 
 if 'scan_results' not in st.session_state:
     st.session_state.scan_results = {}
@@ -113,65 +112,56 @@ class TechnicalScorer:
         return score, suggestion, checks
 
 # ==========================================
-# 2. 爬蟲與輔助功能 (三段式修復版)
+# 2. 爬蟲與輔助功能 (TradingView 全市場)
 # ==========================================
 @st.cache_data(ttl=86400) 
 def get_us_symbols():
     """
-    [修復版] 三段式獲取代碼機制，確保不只有 6 檔
+    [升級版] 使用 TradingView Scanner API 獲取全美股
+    優勢：精準排除 Pink Sheet 與 特別股
     """
-    symbols = []
+    url = "https://scanner.tradingview.com/america/scan"
+    payload = {
+        "filter": [
+            {"left": "type", "operation": "equal", "right": "stock"},      # 僅限股票 (排除 ETF)
+            {"left": "subtype", "operation": "equal", "right": "common"},  # 僅限普通股 (排除特別股)
+            {"left": "exchange", "operation": "in_range", "right": ["NYSE", "NASDAQ", "AMEX"]}, # 指定交易所 (排除 Pink)
+            {"left": "close", "operation": "greater", "right": 1}          # 排除股價 < 1 的雞蛋水餃股
+        ],
+        "options": {"lang": "en"},
+        "symbols": {"query": {"types": []}, "tickers": []},
+        "columns": ["name", "close", "volume", "description"],
+        "sort": {"sortBy": "volume", "sortOrder": "desc"}, # 按成交量排序
+        "range": [0, 8000] # 抓取前 8000 檔
+    }
     
-    # ---------------------------------------------------
-    # 1. 嘗試從 NASDAQ 官方 FTP 獲取全市場 (~8000檔)
-    # ---------------------------------------------------
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        url = "http://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt"
-        r = requests.get(url, headers=headers, timeout=10)
+        r = requests.post(url, json=payload, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
         if r.status_code == 200:
-            df = pd.read_csv(io.StringIO(r.text), sep='|')
-            # 排除測試股與 ETF
-            df = df[(df['Test Issue'] == 'N') & (df['ETF'] == 'N')]
-            st.session_state.stock_map = dict(zip(df['Symbol'], df['Security Name']))
-            return sorted(df['Symbol'].tolist())
-    except:
-        pass # 失敗則進入下一階段
-
-    # ---------------------------------------------------
-    # 2. 嘗試從 GitHub 獲取 S&P 500 成分股 (~500檔)
-    # ---------------------------------------------------
-    try:
-        url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv"
-        df = pd.read_csv(url)
-        st.session_state.stock_map = dict(zip(df['Symbol'], df['Name']))
-        return sorted(df['Symbol'].tolist())
-    except:
-        pass
-
-    # ---------------------------------------------------
-    # 3. 最後防線：內建 Nasdaq 100 重點成分股 (100檔)
-    # ---------------------------------------------------
-    # 如果以上都失敗，回傳這 100 檔，絕對比 6 檔好
-    nasdaq_100 = [
-        'AAPL', 'MSFT', 'AMZN', 'GOOG', 'GOOGL', 'META', 'TSLA', 'NVDA', 'PYPL', 'ADBE', 
-        'NFLX', 'PEP', 'CSCO', 'CMCSA', 'INTC', 'AMGN', 'COST', 'TXN', 'AVGO', 'TMUS', 
-        'QCOM', 'CHTR', 'SBUX', 'AMD', 'INTU', 'GILD', 'ISRG', 'FISV', 'BKNG', 'MDLZ', 
-        'ADP', 'ATVI', 'CSX', 'MU', 'AMAT', 'ILMN', 'ADSK', 'BIIB', 'ADI', 'LRCX', 
-        'REGN', 'JD', 'MELI', 'VRTX', 'KHC', 'NXPI', 'WBA', 'MAR', 'ROST', 'BIDU', 
-        'MNST', 'LULU', 'KLAC', 'EXC', 'EA', 'AEP', 'DOCU', 'ALGN', 'DXCM', 'IDXX', 
-        'WDAY', 'CDNS', 'PAYX', 'SNPS', 'CTSH', 'ORLY', 'MCHP', 'NTES', 'SGEN', 'SPLK', 
-        'VRSK', 'XEL', 'PCAR', 'FAST', 'DLTR', 'ANSS', 'XLNX', 'CTAS', 'SWKS', 'VRSN', 
-        'CPRT', 'CDW', 'CERN', 'INCY', 'MXIM', 'CHKP', 'TCOM', 'ASML', 'OKTA', 'ZM'
-    ]
-    return sorted(nasdaq_100)
+            data = r.json().get('data', [])
+            symbols = []
+            
+            for item in data:
+                # 代碼轉換：TradingView 的 "BRK.B" -> YFinance 的 "BRK-B"
+                sym = item['d'][0].replace(".", "-") 
+                name = item['d'][3]
+                symbols.append(sym)
+                st.session_state.stock_map[sym] = name
+                
+            return symbols
+            
+    except Exception as e:
+        print(f"Error fetching symbols: {e}")
+        
+    # 萬一失敗的備用清單 (Nasdaq 100)
+    return ['AAPL', 'MSFT', 'AMZN', 'GOOG', 'NVDA', 'TSLA', 'META', 'NFLX']
 
 def get_stock_name(symbol):
     return st.session_state.stock_map.get(symbol, symbol)
 
 def send_discord_webhook(url, strategy, data):
     try:
-        requests.post(url, json={"content": f"📢 **{strategy} 美股戰報 (Web版)**"})
+        requests.post(url, json={"content": f"📢 **{strategy} 美股戰報 (US Edition)**"})
         chunk_size = 10
         for i in range(0, len(data), chunk_size):
             chunk = data[i:i+chunk_size]
@@ -204,8 +194,8 @@ def send_discord_webhook(url, strategy, data):
                 else:
                     cell.set_facecolor('#f9f9f9' if row % 2 == 0 else '#e0e0e0')
                     text_color = 'black'
-                    if col == 4: cell.set_text_props(color='#d62728', weight='bold') # 停利紅
-                    if col == 5: cell.set_text_props(color='#2ca02c', weight='bold') # 停損綠
+                    if col == 4: cell.set_text_props(color='#d62728', weight='bold')
+                    if col == 5: cell.set_text_props(color='#2ca02c', weight='bold')
                     else: cell.set_text_props(color='black')
             
             buf = io.BytesIO()
@@ -225,13 +215,11 @@ webhook_url = st.sidebar.text_input("Discord Webhook 網址", value=GLOBAL_CONFI
 atr_mul = st.sidebar.number_input("ATR 止損倍數", 2.0, step=0.1)
 rr_ratio = st.sidebar.number_input("盈虧比 (R/R)", 2.0, step=0.1)
 
-# 獲取並顯示檔數
+# 載入代碼
 symbols_list = get_us_symbols()
-# 根據數量判斷是哪種來源
-source_hint = "全市場" if len(symbols_list) > 2000 else ("S&P 500" if len(symbols_list) > 400 else "Nasdaq 100")
-st.sidebar.success(f"📊 監控範圍: {source_hint} | 共 **{len(symbols_list)}** 檔")
+st.sidebar.success(f"📊 全市場監控中 (排除OTC/特別股)\n共 **{len(symbols_list)}** 檔標的")
 
-st.title("🚀 美股全方位決策系統 (Nasdaq 旗艦版)")
+st.title("🚀 美股全方位決策系統 (全市場版)")
 
 # ==========================================
 # 4. 策略邏輯
@@ -240,6 +228,10 @@ def run_scan(strategy_key, params):
     progress = st.progress(0, text="系統初始化中...")
     symbols = get_us_symbols()
     results = []
+    
+    # 為了節省時間，我們可以在這裡先做一次成交量過濾 (如果 symbols 列表有包含 volume 資訊)
+    # 但為了保持架構一致，我們維持在迴圈內下載過濾，但建議縮小範圍
+    
     batch_size = 50
     total = len(symbols)
     
@@ -260,6 +252,7 @@ def run_scan(strategy_key, params):
                     curr = float(c.iloc[-1])
                     vma5 = v.rolling(5).mean().iloc[-1]
                     
+                    # 成交量過濾
                     if vma5 < params['min_vol']: continue
                     
                     match = False
@@ -339,7 +332,7 @@ def run_scan(strategy_key, params):
     if not results: st.warning("⚠️ 掃描完成，未發現符合條件的標的。")
 
 # ==========================================
-# 5. 介面 (中文化)
+# 5. 介面
 # ==========================================
 tabs = st.tabs(['🌊 VCP 波段', '📈 策略一: 單均線', '🚀 策略二: 三線多排', '📊 策略三: 長期KD', '⚡ 策略四: 中期KD', '💎 策略五: KD+MA'])
 
@@ -415,7 +408,6 @@ def render_ui(idx, key, name):
                             fig.patch.set_facecolor('black')
                             ax.set_facecolor('black')
                             
-                            # 美股配色：綠漲紅跌
                             up = sub[sub.Close >= sub.Open]
                             down = sub[sub.Close < sub.Open]
                             ax.bar(up.index, up.Close - up.Open, 0.8, bottom=up.Open, color='#2ca02c')
