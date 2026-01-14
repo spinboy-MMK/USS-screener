@@ -113,50 +113,58 @@ class TechnicalScorer:
         return score, suggestion, checks
 
 # ==========================================
-# 2. 爬蟲與輔助功能 (修復版)
+# 2. 爬蟲與輔助功能 (三段式修復版)
 # ==========================================
 @st.cache_data(ttl=86400) 
 def get_us_symbols():
     """
-    [Method A 修復] 加入 Headers 繞過 NASDAQ 阻擋
+    [修復版] 三段式獲取代碼機制，確保不只有 6 檔
     """
+    symbols = []
+    
+    # ---------------------------------------------------
+    # 1. 嘗試從 NASDAQ 官方 FTP 獲取全市場 (~8000檔)
+    # ---------------------------------------------------
     try:
-        # 1. 設定瀏覽器標頭，防止被誤判為機器人
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
+        headers = {"User-Agent": "Mozilla/5.0"}
         url = "http://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt"
-        
-        # 2. 下載並解析
-        r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code != 200:
-            raise Exception("Connection blocked")
-            
-        df = pd.read_csv(io.StringIO(r.text), sep='|')
-        
-        # 3. 排除測試股 (Test Issue) 與 ETF (保留普通股)
-        # 這裡過濾掉 Test Issue 為 'Y' 的
-        df = df[df['Test Issue'] == 'N']
-        df = df[df['ETF'] == 'N'] # 篩掉 ETF，專注於個股
-        
-        # 建立名稱對應表
-        stock_map = dict(zip(df['Symbol'], df['Security Name']))
-        st.session_state.stock_map = stock_map
-        
-        symbols = df['Symbol'].tolist()
-        return sorted(list(set(symbols)))
-        
-    except Exception as e:
-        # 備用方案：S&P 500 (若 NASDAQ 全市場抓取失敗)
-        try:
-            url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-            df = pd.read_html(url)[0]
-            symbols = df['Symbol'].tolist()
-            for idx, row in df.iterrows():
-                st.session_state.stock_map[row['Symbol']] = row['Security']
-            return symbols
-        except:
-            return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'TSLA']
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            df = pd.read_csv(io.StringIO(r.text), sep='|')
+            # 排除測試股與 ETF
+            df = df[(df['Test Issue'] == 'N') & (df['ETF'] == 'N')]
+            st.session_state.stock_map = dict(zip(df['Symbol'], df['Security Name']))
+            return sorted(df['Symbol'].tolist())
+    except:
+        pass # 失敗則進入下一階段
+
+    # ---------------------------------------------------
+    # 2. 嘗試從 GitHub 獲取 S&P 500 成分股 (~500檔)
+    # ---------------------------------------------------
+    try:
+        url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv"
+        df = pd.read_csv(url)
+        st.session_state.stock_map = dict(zip(df['Symbol'], df['Name']))
+        return sorted(df['Symbol'].tolist())
+    except:
+        pass
+
+    # ---------------------------------------------------
+    # 3. 最後防線：內建 Nasdaq 100 重點成分股 (100檔)
+    # ---------------------------------------------------
+    # 如果以上都失敗，回傳這 100 檔，絕對比 6 檔好
+    nasdaq_100 = [
+        'AAPL', 'MSFT', 'AMZN', 'GOOG', 'GOOGL', 'META', 'TSLA', 'NVDA', 'PYPL', 'ADBE', 
+        'NFLX', 'PEP', 'CSCO', 'CMCSA', 'INTC', 'AMGN', 'COST', 'TXN', 'AVGO', 'TMUS', 
+        'QCOM', 'CHTR', 'SBUX', 'AMD', 'INTU', 'GILD', 'ISRG', 'FISV', 'BKNG', 'MDLZ', 
+        'ADP', 'ATVI', 'CSX', 'MU', 'AMAT', 'ILMN', 'ADSK', 'BIIB', 'ADI', 'LRCX', 
+        'REGN', 'JD', 'MELI', 'VRTX', 'KHC', 'NXPI', 'WBA', 'MAR', 'ROST', 'BIDU', 
+        'MNST', 'LULU', 'KLAC', 'EXC', 'EA', 'AEP', 'DOCU', 'ALGN', 'DXCM', 'IDXX', 
+        'WDAY', 'CDNS', 'PAYX', 'SNPS', 'CTSH', 'ORLY', 'MCHP', 'NTES', 'SGEN', 'SPLK', 
+        'VRSK', 'XEL', 'PCAR', 'FAST', 'DLTR', 'ANSS', 'XLNX', 'CTAS', 'SWKS', 'VRSN', 
+        'CPRT', 'CDW', 'CERN', 'INCY', 'MXIM', 'CHKP', 'TCOM', 'ASML', 'OKTA', 'ZM'
+    ]
+    return sorted(nasdaq_100)
 
 def get_stock_name(symbol):
     return st.session_state.stock_map.get(symbol, symbol)
@@ -217,8 +225,11 @@ webhook_url = st.sidebar.text_input("Discord Webhook 網址", value=GLOBAL_CONFI
 atr_mul = st.sidebar.number_input("ATR 止損倍數", 2.0, step=0.1)
 rr_ratio = st.sidebar.number_input("盈虧比 (R/R)", 2.0, step=0.1)
 
+# 獲取並顯示檔數
 symbols_list = get_us_symbols()
-st.sidebar.success(f"📊 美股監控檔數: **{len(symbols_list)}**")
+# 根據數量判斷是哪種來源
+source_hint = "全市場" if len(symbols_list) > 2000 else ("S&P 500" if len(symbols_list) > 400 else "Nasdaq 100")
+st.sidebar.success(f"📊 監控範圍: {source_hint} | 共 **{len(symbols_list)}** 檔")
 
 st.title("🚀 美股全方位決策系統 (Nasdaq 旗艦版)")
 
